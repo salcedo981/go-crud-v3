@@ -1,46 +1,50 @@
 package middleware
 
-
 import (
-    "strings"
-    "github.com/gofiber/fiber/v3"
-    "github.com/golang-jwt/jwt/v4"
-    utils_v1 "github.com/FDSAP-Git-Org/hephaestus/utils/v1"
-    v1 "github.com/FDSAP-Git-Org/hephaestus/helper/v1"
-    "github.com/FDSAP-Git-Org/hephaestus/respcode"
-    "net/http"
+	"log"
+	"net/http"
+	"strings"
+
+	v1 "github.com/FDSAP-Git-Org/hephaestus/helper/v1"
+	"github.com/FDSAP-Git-Org/hephaestus/respcode"
+	utils_v1 "github.com/FDSAP-Git-Org/hephaestus/utils/v1"
+	"github.com/gofiber/fiber/v3"
+	"github.com/golang-jwt/jwt/v4"
 )
 
 func AuthMiddleware() fiber.Handler {
-    return func(c fiber.Ctx) error {
-        authHeader := c.Get("Authorization")
-        if authHeader == "" {
-            return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, 
-                "Authorization header missing", nil, http.StatusUnauthorized)
-        }
+	return func(c fiber.Ctx) error {
+		log.Printf("debug logger")
+		// log.Printf("user Id: %v", c.Locals("userId"))
 
-        tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-        if tokenString == authHeader {
-            return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, 
-                "Invalid token format", nil, http.StatusUnauthorized)
-        }
+		authHeader := c.Get("Authorization")
+		if authHeader == "" {
+			return v1.JSONResponseWithError(c, respcode.ERR_CODE_401,
+				"Authorization header missing", nil, http.StatusUnauthorized)
+		}
 
-        // Parse and validate JWT
-        token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-            return []byte(utils_v1.GetEnv("JWT_SECRET")), nil
-        })
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		if tokenString == authHeader {
+			return v1.JSONResponseWithError(c, respcode.ERR_CODE_401,
+				"Invalid token format", nil, http.StatusUnauthorized)
+		}
 
-        if err != nil || !token.Valid {
-            return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, 
-                "Invalid or expired token", err, http.StatusUnauthorized)
-        }
+		// Parse and validate JWT
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			return []byte(utils_v1.GetEnv("JWT_SECRET")), nil
+		})
 
-        // Extract claims and store user info in context
-        if claims, ok := token.Claims.(jwt.MapClaims); ok {
-            c.Locals("userId", claims["body"].(map[string]interface{})["userId"])
-            c.Locals("email", claims["body"].(map[string]interface{})["email"])
-        }
+		if err != nil || !token.Valid {
+			return v1.JSONResponseWithError(c, respcode.ERR_CODE_401,
+				"Invalid or expired token", err, http.StatusUnauthorized)
+		}
 
-        return c.Next()
-    }
+		// Extract claims and store user info in context
+		if claims, ok := token.Claims.(jwt.MapClaims); ok {
+			c.Locals("userId", claims["body"].(map[string]interface{})["userId"])
+			c.Locals("email", claims["body"].(map[string]interface{})["email"])
+		}
+
+		return c.Next()
+	}
 }
