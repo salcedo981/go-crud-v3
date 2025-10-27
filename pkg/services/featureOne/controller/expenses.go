@@ -1,8 +1,15 @@
 package ctrFeatureOne
 
 import (
+	"encoding/json"
+	"fmt"
+	"go_template_v3/pkg/config"
 	"go_template_v3/pkg/global/utils"
+	mdlFeatureOne "go_template_v3/pkg/services/featureOne/model"
+	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	v1 "github.com/FDSAP-Git-Org/hephaestus/helper/v1"
 	"github.com/FDSAP-Git-Org/hephaestus/respcode"
@@ -22,9 +29,62 @@ func AddExpense(c fiber.Ctx) error {
 	// 3. Add userId to the payload (controller logic)
 	reqBody["userId"] = userId
 
-	
 	// 4. Execute the query
 	return utils.ExecuteDBFunction(c, "SELECT add_expense_v3($1)", reqBody)
+}
+
+func AddExpenseV2(c fiber.Ctx) error {
+	userId := utils.GetUserId(c)
+	reqBody := mdlFeatureOne.AddExpenseRequest{}
+
+	if err := c.Bind().Body(&reqBody); err != nil {
+		return v1.JSONResponseWithError(
+			c, respcode.ERR_CODE_400,
+			"Invalid request body", err,
+			http.StatusBadRequest,
+		)
+	}
+
+	// 3. Field validation
+	if strings.TrimSpace(reqBody.Title) == "" {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Title is required", nil, http.StatusBadRequest)
+	}
+
+	if reqBody.Amount <= 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Amount must be greater than 0", nil, http.StatusBadRequest)
+	}
+
+	if reqBody.Date != nil && strings.TrimSpace(*reqBody.Date) != "" {
+		if _, err := time.Parse("2006-01-02", *reqBody.Date); err != nil {
+			return v1.JSONResponseWithError(
+				c,
+				respcode.ERR_CODE_400,
+				"Invalid date format (expected YYYY-MM-DD)",
+				err,
+				http.StatusBadRequest,
+			)
+		}
+	}
+
+	// 4. Prepare payload for DB
+	payload := map[string]interface{}{
+		"userId": userId,
+		"title":  reqBody.Title,
+		"amount": reqBody.Amount,
+	}
+
+	if reqBody.CategoryID != nil {
+		payload["categoryId"] = *reqBody.CategoryID
+	}
+	if reqBody.Date != nil && strings.TrimSpace(*reqBody.Date) != "" {
+		payload["date"] = *reqBody.Date
+	}
+	if reqBody.Notes != nil && strings.TrimSpace(*reqBody.Notes) != "" {
+		payload["notes"] = *reqBody.Notes
+	}
+
+	// 5. Execute the PostgreSQL function
+	return utils.ExecuteDBFunction(c, "SELECT add_expense_v2($1)", payload)
 }
 
 func UpdateExpense(c fiber.Ctx) error {
@@ -158,3 +218,428 @@ func AddCategory(c fiber.Ctx) error {
 // @Failure 400 {object} map[string]string
 // @Failure 500 {object} map[string]string
 // @Router /api/v1/expenses [get]
+
+func BatchUpdateExpenses(c fiber.Ctx) error {
+	var successfulCount = 0
+	var failedCount = 0
+	// 1. Get user ID from JWT
+	userId := utils.GetUserId(c)
+	if userId == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
+	}
+
+	// 2. Parse request body
+	var req struct {
+		Updates []map[string]interface{} `json:"updates"`
+	}
+	if err := c.Bind().Body(&req); err != nil {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Invalid body", err, http.StatusBadRequest)
+	}
+
+	// 3. Validate the batch update request
+	if len(req.Updates) == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "No updates provided", nil, http.StatusBadRequest)
+	}
+
+	if len(req.Updates) > 100 { // Limit batch size to prevent abuse
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Batch size too large. Maximum 100 updates allowed", nil, http.StatusBadRequest)
+	}
+
+	// 4. Process batch updates
+	results := make([]map[string]interface{}, 0, len(req.Updates))
+	hasErrors := false
+
+	for i, update := range req.Updates {
+		// Create a clean payload for individual expense update
+		expensePayload := make(map[string]interface{})
+
+		// Copy only the relevant fields for individual expense update
+		if expenseId, exists := update["expenseId"]; exists {
+			expensePayload["expenseId"] = expenseId
+		} else {
+			results = append(results, map[string]interface{}{
+				"index":   i,
+				"success": false,
+				"error":   "Expense ID is required",
+				"code":    400,
+			})
+			
+			hasErrors = true
+			continue
+		}
+
+		// Add userId
+		expensePayload["userId"] = userId
+
+		// Copy updateable fields
+		if title, exists := update["title"]; exists {
+			expensePayload["title"] = title
+		}
+		if amount, exists := update["amount"]; exists {
+			expensePayload["amount"] = amount
+		}
+		if categoryId, exists := update["categoryId"]; exists {
+			expensePayload["categoryId"] = categoryId
+		}
+		if date, exists := update["date"]; exists {
+			expensePayload["date"] = date
+		}
+		if notes, exists := update["notes"]; exists {
+			expensePayload["notes"] = notes
+		}
+
+		// Execute the update for this expense using the individual update function
+		result, err := utils.ExecuteDBFunctionRaw("SELECT update_expense_v3($1)", expensePayload)
+		if err != nil {
+			log.Println(err.Error())
+		}
+
+		if result["success"] == true {
+			successfulCount++
+		} else {
+			failedCount++
+			result["index"] = i
+			result["expenseId"] = expensePayload["expenseId"]
+			results = append(results, result)
+		}
+
+		if success, ok := result["success"].(bool); !ok || !success {
+			hasErrors = true
+		}
+	}
+
+	// 5. Return batch response
+	responseData := map[string]interface{}{
+		"results":    results,
+		"total":      len(req.Updates),
+		"successful": successfulCount,
+		"failed":     failedCount,
+	}
+
+	if hasErrors {
+		return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
+			"Batch update completed with some errors", responseData, http.StatusMultiStatus)
+	}
+
+	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
+		"All expenses updated successfully", responseData, http.StatusOK)
+}
+
+
+func BatchUpdateExpensesAsync(c fiber.Ctx) error {
+	// 1. Get user ID from JWT
+	userId := utils.GetUserId(c)
+	if userId == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
+	}
+
+	// 2. Parse request body
+	var req []map[string]interface{};
+	if err := c.Bind().Body(&req); err != nil {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Invalid body", err, http.StatusBadRequest)
+	}
+
+	// 3. Validate the batch update request
+	if len(req) == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "No updates provided", nil, http.StatusBadRequest)
+	}
+
+	if len(req) > 100 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Batch size too large. Maximum 100 updates allowed", nil, http.StatusBadRequest)
+	}
+
+	// 4. Create batch job record
+	var jobId int
+	err := config.DBConnList[0].Raw(
+		"SELECT create_batch_job($1, $2, $3)",
+		userId,
+		"expense_batch_update",
+		len(req),
+	).Scan(&jobId).Error
+
+	if err != nil {
+		log.Printf("Error creating batch job: %v", err)
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to create batch job", err, http.StatusInternalServerError)
+	}
+
+	// 5. Process updates in background
+	go processBatchUpdatesAsync(jobId, userId, req)
+
+	// 6. Return immediately with job ID
+	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
+		"Batch update job created successfully",
+		map[string]interface{}{
+			"jobId":      jobId,
+			"totalItems": len(req),
+			"status":     "pending",
+		},
+		http.StatusAccepted)
+}
+
+// processBatchUpdatesAsync - Background worker to process batch updates
+func processBatchUpdatesAsync(jobId int, userId int, updates []map[string]interface{}) {
+	var successfulCount = 0
+	var failedCount = 0
+	results := make([]map[string]interface{}, 0)
+
+	// Update status to processing
+	updateJobStatus(jobId, "processing", 0, 0, 0, nil)
+
+	// Process each update
+	for i, update := range updates {
+		// Create payload for individual expense update
+		expensePayload := make(map[string]interface{})
+
+		// Validate expense ID
+		if expenseId, exists := update["expenseId"]; exists {
+			expensePayload["expenseId"] = expenseId
+		} else {
+			failedCount++
+			results = append(results, map[string]interface{}{
+				"index":     i,
+				"expenseId": nil,
+				"message":   "Expense ID is required",
+			})
+			updateJobProgress(jobId, i+1, successfulCount, failedCount, results)
+			continue
+		}
+
+		// Add userId
+		expensePayload["userId"] = userId
+
+		// Copy updateable fields
+		if title, exists := update["title"]; exists {
+			expensePayload["title"] = title
+		}
+		if amount, exists := update["amount"]; exists {
+			expensePayload["amount"] = amount
+		}
+		if categoryId, exists := update["categoryId"]; exists {
+			expensePayload["categoryId"] = categoryId
+		}
+		if date, exists := update["date"]; exists {
+			expensePayload["date"] = date
+		}
+		if notes, exists := update["notes"]; exists {
+			expensePayload["notes"] = notes
+		}
+
+		// Execute the update
+		result, err := utils.ExecuteDBFunctionRaw("SELECT update_expense_v3($1)", expensePayload)
+		if err != nil {
+			log.Printf("Error executing update for expense %v: %v", expensePayload["expenseId"], err)
+			failedCount++
+			results = append(results, map[string]interface{}{
+				"index":     i,
+				"expenseId": expensePayload["expenseId"],
+				"message":   err.Error(),
+			})
+		} else if result["success"] == true {
+			successfulCount++
+			// For successful updates, you might want to store minimal info or skip
+			results = append(results, map[string]interface{}{
+				"index":     i,
+				"expenseId": expensePayload["expenseId"],
+				"message":   "Successfully updated",
+			})
+		} else {
+			failedCount++
+			// Extract only the message from the result
+			message := "Update failed"
+			if msg, exists := result["message"]; exists {
+				message = msg.(string)
+			} else if errMsg, exists := result["error"]; exists {
+				message = errMsg.(string)
+			}
+			
+			results = append(results, map[string]interface{}{
+				"index":     i,
+				"expenseId": expensePayload["expenseId"],
+				"message":   message,
+			})
+		}
+
+		// Update progress after each item
+		updateJobProgress(jobId, i+1, successfulCount, failedCount, results)
+
+		// Add small delay to prevent overwhelming the database
+		time.Sleep(1 * time.Minute)
+	}
+
+	// Mark job as completed
+	finalStatus := "completed"
+	if failedCount == len(updates) {
+		finalStatus = "failed"
+	}
+
+	updateJobStatus(jobId, finalStatus, len(updates), successfulCount, failedCount, results)
+}
+
+// updateJobStatus - Helper to update job status
+func updateJobStatus(jobId int, status string, processed, successful, failed int, results interface{}) {
+	resultsJSON, _ := json.Marshal(results)
+	err := config.DBConnList[0].Exec(
+		"SELECT update_batch_job_progress($1, $2, $3, $4, $5, $6)",
+		jobId,
+		status,
+		processed,
+		successful,
+		failed,
+		string(resultsJSON),
+	).Error
+
+	if err != nil {
+		log.Printf("Error updating job status for job %d: %v", jobId, err)
+	}
+}
+
+// updateJobProgress - Helper to update job progress (only counts)
+func updateJobProgress(jobId int, processed, successful, failed int, results interface{}) {
+	resultsJSON, _ := json.Marshal(results)
+
+	err := config.DBConnList[0].Exec(
+		"SELECT update_batch_job_progress($1, NULL, $2, $3, $4, $5)",
+		jobId,
+		processed,
+		successful,
+		failed,
+		string(resultsJSON),
+	).Error
+
+	if err != nil {
+		log.Printf("Error updating job progress for job %d: %v", jobId, err)
+	}
+}
+
+// GetBatchJobStatus - Endpoint to check job status
+func GetBatchJobStatus(c fiber.Ctx) error {
+	// Get user ID from JWT
+	userId := utils.GetUserId(c)
+	if userId == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
+	}
+
+	// Get job ID from params
+	jobId := c.Params("jobId")
+	if jobId == "" {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Job ID is required", nil, http.StatusBadRequest)
+	}
+
+	// Query job status
+	var resultStr string
+	err := config.DBConnList[0].Raw(`
+		SELECT jsonb_build_object(
+			'jobId', id,
+			'userId', user_id,
+			'jobType', job_type,
+			'status', status,
+			'totalItems', total_items,
+			'processedItems', processed_items,
+			'successfulItems', successful_items,
+			'failedItems', failed_items,
+			'results', results,
+			'createdAt', created_at,
+			'updatedAt', updated_at,
+			'completedAt', completed_at
+		)
+		FROM batch_jobs
+		WHERE id = $1 AND user_id = $2
+	`, jobId, userId).Scan(&resultStr).Error
+
+	if err != nil {
+		log.Printf("Error fetching job status: %v", err)
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to fetch job status", err, http.StatusInternalServerError)
+	}
+
+	if resultStr == "" {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_404, "Job not found", nil, http.StatusNotFound)
+	}
+
+	var jobData map[string]interface{}
+	if err := json.Unmarshal([]byte(resultStr), &jobData); err != nil {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to parse job data", err, http.StatusInternalServerError)
+	}
+
+	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
+		"Job status retrieved successfully",
+		jobData,
+		http.StatusOK)
+}
+
+// ListBatchJobs - Endpoint to list all batch jobs for a user
+func ListBatchJobs(c fiber.Ctx) error {
+	// Get user ID from JWT
+	userId := utils.GetUserId(c)
+	if userId == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
+	}
+
+	// Optional query params for filtering
+	status := c.Query("status", "")
+	limit := fiber.Query[int](c, "limit", 10)
+	offset := fiber.Query[int](c, "offset", 0)
+
+	// Build query
+	query := `
+		SELECT jsonb_agg(
+			jsonb_build_object(
+				'jobId', id,
+				'jobType', job_type,
+				'status', status,
+				'totalItems', total_items,
+				'processedItems', processed_items,
+				'successfulItems', successful_items,
+				'failedItems', failed_items,
+				'createdAt', created_at,
+				'updatedAt', updated_at,
+				'completedAt', completed_at
+			)
+		)
+		FROM (
+			SELECT * FROM batch_jobs
+			WHERE user_id = $1
+	`
+
+	args := []interface{}{userId}
+	argIndex := 2
+
+	if status != "" {
+		query += fmt.Sprintf(" AND status = $%d", argIndex)
+		args = append(args, status)
+		argIndex++
+	}
+
+	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argIndex, argIndex+1)
+	args = append(args, limit, offset)
+	query += ") subquery"
+
+	var resultStr string
+	err := config.DBConnList[0].Raw(query, args...).Scan(&resultStr).Error
+
+	if err != nil {
+		log.Printf("Error fetching batch jobs: %v", err)
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to fetch batch jobs", err, http.StatusInternalServerError)
+	}
+
+	var jobs []map[string]interface{}
+	if resultStr != "" && resultStr != "null" {
+		if err := json.Unmarshal([]byte(resultStr), &jobs); err != nil {
+			return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to parse jobs data", err, http.StatusInternalServerError)
+		}
+	}
+
+	if jobs == nil {
+		jobs = []map[string]interface{}{}
+	}
+
+	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
+		"Batch jobs retrieved successfully",
+		map[string]interface{}{
+			"jobs":   jobs,
+			"limit":  limit,
+			"offset": offset,
+		},
+		http.StatusOK)
+}
+
+

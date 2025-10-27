@@ -156,6 +156,27 @@ func ExecuteDBFunction(c fiber.Ctx, query string, payload map[string]interface{}
 	return v1.JSONResponseWithData(c, codeStr, message, data, codeInt)
 }
 
+// Returns map
+func ExecuteDBFunctionRaw(dbFunc string, payload interface{}) (map[string]interface{}, error) {
+    inputJSON, err := json.Marshal(payload)
+    if err != nil {
+        return nil, fmt.Errorf("failed to marshal input: %w", err)
+    }
+
+    var resultStr string
+    err = config.DBConnList[0].Raw((dbFunc), string(inputJSON)).Scan(&resultStr).Error
+    if err != nil {
+        return nil, fmt.Errorf("db error: %w", err)
+    }
+
+    var result map[string]interface{}
+    if err := json.Unmarshal([]byte(resultStr), &result); err != nil {
+        return nil, fmt.Errorf("failed to parse DB response: %w", err)
+    }
+
+    return result, nil
+}
+
 
 var CodeMessageMap = map[string]string{
 	// Success codes

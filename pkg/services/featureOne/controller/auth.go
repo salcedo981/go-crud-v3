@@ -318,44 +318,17 @@ func sendPasswordResetEmail(email, name, token string) error {
 	</html>
 	`, name, resetLink, resetLink)
 
-	// Plain text version for email clients that don't support HTML
-	textBody := fmt.Sprintf(`
-Password Reset Request
-
-Hello %s,
-
-You requested to reset your password. Use the link below to create a new password:
-
-%s
-
-This link will expire in 1 hour for security reasons.
-
-If you didn't request this reset, please ignore this email.
-
-This is an automated message, please do not reply to this email.
-	`, name, resetLink)
-
-	// TODO: Implement your email sending service here
-	// This is a placeholder - integrate with your email service provider
-	// Examples: SendGrid, AWS SES, SMTP, etc.
-	
 	fmt.Printf("=== PASSWORD RESET EMAIL ===\n")
 	fmt.Printf("To: %s\n", email)
 	fmt.Printf("Subject: %s\n", subject)
 	fmt.Printf("Reset Link: %s\n", resetLink)
 	fmt.Printf("=======================\n")
 
-	// Example with SendGrid (you would need to install the package):
-	// return sendWithSendGrid(email, subject, htmlBody, textBody)
-	
-	// Example with SMTP:
-	return sendWithSMTP(email, subject, htmlBody, textBody)
-	
-	// For now, just log and return nil since we don't have email service configured
-	
+	// Send via SMTP
+	return sendWithSMTP(email, subject, htmlBody)
 }
 
-func sendWithSMTP(to, subject, htmlContent, textBody string) error {
+func sendWithSMTP(to, subject, htmlContent string) error {
 	smtpHost := utils_v1.GetEnv("SMTP_HOST")
 	smtpPort := utils_v1.GetEnv("SMTP_PORT")
 	smtpUser := utils_v1.GetEnv("SMTP_USER")
