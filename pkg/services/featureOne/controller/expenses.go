@@ -8,11 +8,13 @@ import (
 	mdlFeatureOne "go_template_v3/pkg/services/featureOne/model"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	v1 "github.com/FDSAP-Git-Org/hephaestus/helper/v1"
 	"github.com/FDSAP-Git-Org/hephaestus/respcode"
+	utils_v1 "github.com/FDSAP-Git-Org/hephaestus/utils/v1"
 	"github.com/gofiber/fiber/v3"
 )
 
@@ -177,8 +179,8 @@ func DeleteExpense(c fiber.Ctx) error {
 
 	// 2. Build payload (controller logic)
 	payload := map[string]interface{}{
-		"userId": userId,
-		"id":     c.Params("id"),
+		"userId":    userId,
+		"expenseId": c.Params("id"),
 	}
 
 	// 3. Execute the query
@@ -229,27 +231,25 @@ func BatchUpdateExpenses(c fiber.Ctx) error {
 	}
 
 	// 2. Parse request body
-	var req struct {
-		Updates []map[string]interface{} `json:"updates"`
-	}
+	var req []map[string]any
 	if err := c.Bind().Body(&req); err != nil {
 		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Invalid body", err, http.StatusBadRequest)
 	}
 
 	// 3. Validate the batch update request
-	if len(req.Updates) == 0 {
+	if len(req) == 0 {
 		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "No updates provided", nil, http.StatusBadRequest)
 	}
 
-	if len(req.Updates) > 100 { // Limit batch size to prevent abuse
+	if len(req) > 100 { // Limit batch size to prevent abuse
 		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Batch size too large. Maximum 100 updates allowed", nil, http.StatusBadRequest)
 	}
 
 	// 4. Process batch updates
-	results := make([]map[string]interface{}, 0, len(req.Updates))
+	results := make([]map[string]interface{}, 0, len(req))
 	hasErrors := false
 
-	for i, update := range req.Updates {
+	for i, update := range req {
 		// Create a clean payload for individual expense update
 		expensePayload := make(map[string]interface{})
 
@@ -258,12 +258,11 @@ func BatchUpdateExpenses(c fiber.Ctx) error {
 			expensePayload["expenseId"] = expenseId
 		} else {
 			results = append(results, map[string]interface{}{
-				"index":   i,
-				"success": false,
-				"error":   "Expense ID is required",
-				"code":    400,
+				"index":     i,
+				"message":   "Expense ID is required",
+				"expenseId": expensePayload["expenseId"],
 			})
-			
+
 			hasErrors = true
 			continue
 		}
@@ -298,9 +297,11 @@ func BatchUpdateExpenses(c fiber.Ctx) error {
 			successfulCount++
 		} else {
 			failedCount++
-			result["index"] = i
-			result["expenseId"] = expensePayload["expenseId"]
-			results = append(results, result)
+			results = append(results, map[string]interface{}{
+				"index":     i,
+				"expenseId": expensePayload["expenseId"],
+				"message":   result["message"],
+			})
 		}
 
 		if success, ok := result["success"].(bool); !ok || !success {
@@ -311,7 +312,7 @@ func BatchUpdateExpenses(c fiber.Ctx) error {
 	// 5. Return batch response
 	responseData := map[string]interface{}{
 		"results":    results,
-		"total":      len(req.Updates),
+		"total":      len(req),
 		"successful": successfulCount,
 		"failed":     failedCount,
 	}
@@ -325,7 +326,6 @@ func BatchUpdateExpenses(c fiber.Ctx) error {
 		"All expenses updated successfully", responseData, http.StatusOK)
 }
 
-
 func BatchUpdateExpensesAsync(c fiber.Ctx) error {
 	// 1. Get user ID from JWT
 	userId := utils.GetUserId(c)
@@ -334,7 +334,7 @@ func BatchUpdateExpensesAsync(c fiber.Ctx) error {
 	}
 
 	// 2. Parse request body
-	var req []map[string]interface{};
+	var req []map[string]interface{}
 	if err := c.Bind().Body(&req); err != nil {
 		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Invalid body", err, http.StatusBadRequest)
 	}
@@ -374,6 +374,61 @@ func BatchUpdateExpensesAsync(c fiber.Ctx) error {
 			"status":     "pending",
 		},
 		http.StatusAccepted)
+}
+
+// GetBatchJobStatus - Endpoint to check job status
+func GetBatchJobStatus(c fiber.Ctx) error {
+	// Get user ID from JWT
+	userId := utils.GetUserId(c)
+	if userId == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
+	}
+
+	// Get job ID from params
+	jobId := c.Params("jobId")
+	if jobId == "" {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Job ID is required", nil, http.StatusBadRequest)
+	}
+
+	// Query job status
+	var resultStr string
+	err := config.DBConnList[0].Raw(`
+		SELECT jsonb_build_object(
+			'jobId', id,
+			'userId', user_id,
+			'jobType', job_type,
+			'status', status,
+			'totalItems', total_items,
+			'processedItems', processed_items,
+			'successfulItems', successful_items,
+			'failedItems', failed_items,
+			'results', results,
+			'createdAt', created_at,
+			'updatedAt', updated_at,
+			'completedAt', completed_at
+		)
+		FROM batch_jobs
+		WHERE id = $1 AND user_id = $2
+	`, jobId, userId).Scan(&resultStr).Error
+
+	if err != nil {
+		log.Printf("Error fetching job status: %v", err)
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to fetch job status", err, http.StatusInternalServerError)
+	}
+
+	if resultStr == "" {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_404, "Job not found", nil, http.StatusNotFound)
+	}
+
+	var jobData map[string]interface{}
+	if err := json.Unmarshal([]byte(resultStr), &jobData); err != nil {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to parse job data", err, http.StatusInternalServerError)
+	}
+
+	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
+		"Job status retrieved successfully",
+		jobData,
+		http.StatusOK)
 }
 
 // processBatchUpdatesAsync - Background worker to process batch updates
@@ -451,7 +506,7 @@ func processBatchUpdatesAsync(jobId int, userId int, updates []map[string]interf
 			} else if errMsg, exists := result["error"]; exists {
 				message = errMsg.(string)
 			}
-			
+
 			results = append(results, map[string]interface{}{
 				"index":     i,
 				"expenseId": expensePayload["expenseId"],
@@ -511,135 +566,78 @@ func updateJobProgress(jobId int, processed, successful, failed int, results int
 	}
 }
 
-// GetBatchJobStatus - Endpoint to check job status
-func GetBatchJobStatus(c fiber.Ctx) error {
-	// Get user ID from JWT
-	userId := utils.GetUserId(c)
-	if userId == 0 {
-		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
+func TestInternalSendRequest(c fiber.Ctx) error {
+	// Hardcoded payload
+	payload := map[string]interface{}{
+		"title":       "New Produkto",
+		"price":       10,
+		"description": "A description",
+		"categoryId":  1,
+		"images":      []string{"https://placehold.co/600x400"},
 	}
 
-	// Get job ID from params
-	jobId := c.Params("jobId")
-	if jobId == "" {
-		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Job ID is required", nil, http.StatusBadRequest)
+	body, _ := json.Marshal(payload)
+
+	headers := map[string]string{
+		"Content-Type": "application/json",
 	}
 
-	// Query job status
-	var resultStr string
-	err := config.DBConnList[0].Raw(`
-		SELECT jsonb_build_object(
-			'jobId', id,
-			'userId', user_id,
-			'jobType', job_type,
-			'status', status,
-			'totalItems', total_items,
-			'processedItems', processed_items,
-			'successfulItems', successful_items,
-			'failedItems', failed_items,
-			'results', results,
-			'createdAt', created_at,
-			'updatedAt', updated_at,
-			'completedAt', completed_at
-		)
-		FROM batch_jobs
-		WHERE id = $1 AND user_id = $2
-	`, jobId, userId).Scan(&resultStr).Error
+	// Make API call
+	response, statusCode, err := utils_v1.SendRequestWithCode(
+		"https://api.escuelajs.co/api/v1/products/",
+		"POST",
+		body,
+		headers,
+		30,
+	)
 
 	if err != nil {
-		log.Printf("Error fetching job status: %v", err)
-		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to fetch job status", err, http.StatusInternalServerError)
-	}
-
-	if resultStr == "" {
-		return v1.JSONResponseWithError(c, respcode.ERR_CODE_404, "Job not found", nil, http.StatusNotFound)
-	}
-
-	var jobData map[string]interface{}
-	if err := json.Unmarshal([]byte(resultStr), &jobData); err != nil {
-		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to parse job data", err, http.StatusInternalServerError)
-	}
-
-	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
-		"Job status retrieved successfully",
-		jobData,
-		http.StatusOK)
-}
-
-// ListBatchJobs - Endpoint to list all batch jobs for a user
-func ListBatchJobs(c fiber.Ctx) error {
-	// Get user ID from JWT
-	userId := utils.GetUserId(c)
-	if userId == 0 {
-		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
-	}
-
-	// Optional query params for filtering
-	status := c.Query("status", "")
-	limit := fiber.Query[int](c, "limit", 10)
-	offset := fiber.Query[int](c, "offset", 0)
-
-	// Build query
-	query := `
-		SELECT jsonb_agg(
-			jsonb_build_object(
-				'jobId', id,
-				'jobType', job_type,
-				'status', status,
-				'totalItems', total_items,
-				'processedItems', processed_items,
-				'successfulItems', successful_items,
-				'failedItems', failed_items,
-				'createdAt', created_at,
-				'updatedAt', updated_at,
-				'completedAt', completed_at
-			)
+		return v1.JSONResponseWithError(
+			c,
+			respcode.ERR_CODE_500,
+			"Failed to create product",
+			err,
+			http.StatusInternalServerError,
 		)
-		FROM (
-			SELECT * FROM batch_jobs
-			WHERE user_id = $1
-	`
-
-	args := []interface{}{userId}
-	argIndex := 2
-
-	if status != "" {
-		query += fmt.Sprintf(" AND status = $%d", argIndex)
-		args = append(args, status)
-		argIndex++
 	}
 
-	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", argIndex, argIndex+1)
-	args = append(args, limit, offset)
-	query += ") subquery"
-
-	var resultStr string
-	err := config.DBConnList[0].Raw(query, args...).Scan(&resultStr).Error
-
-	if err != nil {
-		log.Printf("Error fetching batch jobs: %v", err)
-		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to fetch batch jobs", err, http.StatusInternalServerError)
-	}
-
-	var jobs []map[string]interface{}
-	if resultStr != "" && resultStr != "null" {
-		if err := json.Unmarshal([]byte(resultStr), &jobs); err != nil {
-			return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to parse jobs data", err, http.StatusInternalServerError)
+	// Extract status code number
+	statusCodeNum := http.StatusInternalServerError
+	var statusCodeStr string
+	parts := strings.Fields(*statusCode)
+	if len(parts) > 0 {
+		statusCodeStr = parts[0]
+		if code, err := strconv.Atoi(parts[0]); err == nil {
+			statusCodeNum = code
 		}
 	}
 
-	if jobs == nil {
-		jobs = []map[string]interface{}{}
+	// Check if status code is 2xx
+	if strings.HasPrefix(*statusCode, "2") {
+		return v1.JSONResponseWithData(
+			c,
+			statusCodeStr,
+			"Product created successfully",
+			response,
+			statusCodeNum, // Use the extracted status code!
+		)
+	} else {
+		// Handle non-2xx status codes
+		errorMessage := "External API error"
+		if response != nil {
+			if respMap, ok := response.(map[string]interface{}); ok {
+				if msg, exists := respMap["message"]; exists {
+					errorMessage = fmt.Sprintf("%v", msg)
+				}
+			}
+		}
+
+		return v1.JSONResponseWithError(
+			c,
+			statusCodeStr,
+			errorMessage,
+			nil,
+			statusCodeNum,
+		)
 	}
-
-	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
-		"Batch jobs retrieved successfully",
-		map[string]interface{}{
-			"jobs":   jobs,
-			"limit":  limit,
-			"offset": offset,
-		},
-		http.StatusOK)
 }
-
-

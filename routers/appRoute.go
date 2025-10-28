@@ -17,7 +17,7 @@ func APIRoute(app *fiber.App) {
 	privateV1.Get("/", svcHealthcheck.HealthCheck)
 
 	// Expense Category
-	expenseCategoryEndpoint := publicV1.Group("/expenseCategories")
+	expenseCategoryEndpoint := publicV1.Group("/expense-categories")
 	expenseCategoryEndpoint.Post("/", ctrFeatureOne.AddExpenseCategory)
 	expenseCategoryEndpoint.Get("/", ctrFeatureOne.GetExpenseCategories)
 
@@ -45,5 +45,7 @@ func APIRoute(app *fiber.App) {
 	expenseGroup.Get("/:id", ctrFeatureOne.GetExpense)
 	expenseGroup.Delete("/:id", ctrFeatureOne.DeleteExpense)
 	expenseGroup.Put("/:id", ctrFeatureOne.UpdateExpense)
+
+	expenseGroup.Post("test-internal-send-request", ctrFeatureOne.TestInternalSendRequest)
 
 }
