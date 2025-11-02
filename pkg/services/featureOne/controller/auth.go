@@ -164,7 +164,9 @@ func UpdateUser(c fiber.Ctx) error {
 }
 
 func ForgotPassword(c fiber.Ctx) error {
-	var req struct{ Email *string `json:"email"` }
+	var req struct {
+		Email *string `json:"email"`
+	}
 	if err := c.Bind().Body(&req); err != nil {
 		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Invalid body", err, http.StatusBadRequest)
 	}
@@ -195,10 +197,12 @@ func ForgotPassword(c fiber.Ctx) error {
 	}
 
 	// Send email with reset link
-	if err := sendPasswordResetEmail(user.Email, user.Name, token); err != nil {
-		// Log the error but don't fail the request for security reasons
-		fmt.Printf("Failed to send reset email to %s: %v\n", user.Email, err)
-	}
+	go func() {
+		if err := sendPasswordResetEmail(user.Email, user.Name, token); err != nil {
+			// Log the error but don't fail the request for security reasons
+			fmt.Printf("Failed to send reset email to %s: %v\n", user.Email, err)
+		}
+	}()
 
 	// In development, return token for testing
 	response := map[string]interface{}{"token": token}
@@ -206,7 +210,9 @@ func ForgotPassword(c fiber.Ctx) error {
 }
 
 func VerifyResetToken(c fiber.Ctx) error {
-	var req struct{ Token *string `json:"token"` }
+	var req struct {
+		Token *string `json:"token"`
+	}
 	if err := c.Bind().Body(&req); err != nil {
 		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Invalid body", err, http.StatusBadRequest)
 	}
@@ -236,7 +242,7 @@ func ResetPassword(c fiber.Ctx) error {
 		Token       *string `json:"token"`
 		NewPassword *string `json:"newPassword"`
 	}
-	
+
 	if err := c.Bind().Body(&req); err != nil {
 		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Invalid body", err, http.StatusBadRequest)
 	}
@@ -252,7 +258,7 @@ func ResetPassword(c fiber.Ctx) error {
 	// Verify token and get user ID
 	tokenHash := utils_v1.HashDataSHA512(*req.Token)
 	var tokenInfo struct{ TokenId, UserId int }
-	
+
 	err := config.DBConnList[0].Raw(`
 		SELECT prt.id as token_id, prt.user_id 
 		FROM password_reset_tokens prt 
@@ -272,7 +278,6 @@ func ResetPassword(c fiber.Ctx) error {
 	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200, "Password reset successfully", nil, http.StatusOK)
 }
 
-
 // FORGOT PASSWORD SEND MAIL FUNCTIONS
 func sendPasswordResetEmail(email, name, token string) error {
 	// Get frontend URL from environment variables
@@ -286,7 +291,7 @@ func sendPasswordResetEmail(email, name, token string) error {
 
 	// Email content
 	subject := "Password Reset Request"
-	
+
 	// HTML email template
 	htmlBody := fmt.Sprintf(`
 	<!DOCTYPE html>
@@ -296,7 +301,7 @@ func sendPasswordResetEmail(email, name, token string) error {
 			body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
 			.container { max-width: 600px; margin: 0 auto; padding: 20px; }
 			.button { display: inline-block; padding: 12px 24px; background-color: #007bff; 
-					color: white; text-decoration: none; border-radius: 4px; margin: 20px 0; }
+					color: white !important; text-decoration: none; border-radius: 4px; margin: 20px 0; }
 			.footer { margin-top: 30px; font-size: 12px; color: #666; }
 		</style>
 	</head>
@@ -336,7 +341,7 @@ func sendWithSMTP(to, subject, htmlContent string) error {
 	from := utils_v1.GetEnv("EMAIL_FROM")
 
 	auth := smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
-	
+
 	msg := []byte("To: " + to + "\r\n" +
 		"Subject: " + subject + "\r\n" +
 		"MIME-Version: 1.0\r\n" +

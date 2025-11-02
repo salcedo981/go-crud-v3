@@ -6,9 +6,14 @@ import (
 	svcHealthcheck "go_template_v3/pkg/services/healthcheck"
 
 	"github.com/gofiber/fiber/v3"
+	"github.com/gofiber/fiber/v3/middleware/static"
 )
 
 func APIRoute(app *fiber.App) {
+    app.Use("/uploads", static.New("./uploads", static.Config{
+        MaxAge: 3600, // 1 hour cache
+    }))
+
 	publicV1 := app.Group("/api/public/v1")
 	privateV1 := app.Group("/api/private/v1")
 
@@ -29,11 +34,12 @@ func APIRoute(app *fiber.App) {
 	authGroup.Post("/verify-reset-token", ctrFeatureOne.VerifyResetToken)
 	authGroup.Post("/reset-password", ctrFeatureOne.ResetPassword)
 
+	// Protected Auth Routes
 	authGroupProtected := publicV1.Group("/auth", middleware.AuthMiddleware)
 	authGroupProtected.Put("/update-user", ctrFeatureOne.UpdateUser)
 	authGroupProtected.Post("/logout", ctrFeatureOne.Logout)
 
-	// Protect expense routes
+	// Protected expense routes
 	expenseGroup := publicV1.Group("/expenses", middleware.AuthMiddleware)
 	expenseGroup.Put("/batch", ctrFeatureOne.BatchUpdateExpenses)
 	expenseGroup.Put("/batch-async", ctrFeatureOne.BatchUpdateExpensesAsync)

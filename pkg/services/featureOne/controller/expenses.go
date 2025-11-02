@@ -35,7 +35,7 @@ func AddExpense(c fiber.Ctx) error {
 	return utils.ExecuteDBFunction(c, "SELECT add_expense_v3($1)", reqBody)
 }
 
-func AddExpenseV2(c fiber.Ctx) error {
+func AddExpenseV2Old(c fiber.Ctx) error {
 	userId := utils.GetUserId(c)
 	reqBody := mdlFeatureOne.AddExpenseRequest{}
 
@@ -86,6 +86,99 @@ func AddExpenseV2(c fiber.Ctx) error {
 	}
 
 	// 5. Execute the PostgreSQL function
+	return utils.ExecuteDBFunction(c, "SELECT add_expense_v2($1)", payload)
+}
+
+func AddExpenseV2(c fiber.Ctx) error {
+	userId := utils.GetUserId(c)
+
+	// Parse multipart form
+	form, err := c.MultipartForm()
+	if err != nil {
+		return v1.JSONResponseWithError(
+			c, respcode.ERR_CODE_400,
+			"Invalid form data", err,
+			http.StatusBadRequest,
+		)
+	}
+
+	// Bind handles multipart forms too
+	reqBody := mdlFeatureOne.AddExpenseRequest{}
+	if err := c.Bind().Body(&reqBody); err != nil {
+		return v1.JSONResponseWithError(
+			c, respcode.ERR_CODE_400,
+			"Invalid request body", err,
+			http.StatusBadRequest,
+		)
+	}
+
+	// Field validation
+	if strings.TrimSpace(reqBody.Title) == "" {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Title is required", nil, http.StatusBadRequest)
+	}
+
+	if reqBody.Amount <= 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Amount must be greater than 0", nil, http.StatusBadRequest)
+	}
+
+	if reqBody.Date != nil && strings.TrimSpace(*reqBody.Date) != "" {
+		if _, err := time.Parse("2006-01-02", *reqBody.Date); err != nil {
+			return v1.JSONResponseWithError(
+				c,
+				respcode.ERR_CODE_400,
+				"Invalid date format (expected YYYY-MM-DD)",
+				err,
+				http.StatusBadRequest,
+			)
+		}
+	}
+
+	var imageURL *string
+
+	// Handle file upload
+	if files, ok := form.File["image"]; ok && len(files) > 0 {
+		fileHeader := files[0]
+		config := utils.DefaultFileUploadConfig()
+
+		uploadedPath, err := utils.UploadFile(c, fileHeader, config)
+		if err != nil {
+			return v1.JSONResponseWithError(
+				c, respcode.ERR_CODE_400,
+				"Failed to upload image", err,
+				http.StatusBadRequest,
+			)
+		}
+
+		// Construct full URL if needed
+
+		fullURL := utils_v1.GetEnv("BASE_URL") + uploadedPath
+		imageURL = &fullURL
+	}
+
+	// Prepare payload for DB
+	payload := map[string]interface{}{
+		"userId": userId,
+		"title":  reqBody.Title,
+		"amount": reqBody.Amount,
+	}
+
+	if reqBody.CategoryID != nil {
+		payload["categoryId"] = *reqBody.CategoryID
+	}
+	if reqBody.Date != nil && strings.TrimSpace(*reqBody.Date) != "" {
+		payload["date"] = *reqBody.Date
+	}
+	if reqBody.Notes != nil && strings.TrimSpace(*reqBody.Notes) != "" {
+		payload["notes"] = *reqBody.Notes
+	}
+	if imageURL != nil {
+		payload["imageUrl"] = *imageURL
+	} else if reqBody.ImageURL != nil {
+		// Use existing image URL if provided and no file uploaded
+		payload["imageUrl"] = *reqBody.ImageURL
+	}
+
+	// Execute the PostgreSQL function
 	return utils.ExecuteDBFunction(c, "SELECT add_expense_v2($1)", payload)
 }
 
@@ -170,7 +263,7 @@ func GetExpense(c fiber.Ctx) error {
 	return utils.ExecuteDBFunction(c, "SELECT get_expense_v3($1)", payload)
 }
 
-func DeleteExpense(c fiber.Ctx) error {
+func DeleteExpenseOld(c fiber.Ctx) error {
 	// 1. Get user ID from JWT
 	userId := utils.GetUserId(c)
 	if userId == 0 {
@@ -185,6 +278,58 @@ func DeleteExpense(c fiber.Ctx) error {
 
 	// 3. Execute the query
 	return utils.ExecuteDBFunction(c, "SELECT delete_expense($1)", payload)
+}
+
+func DeleteExpense(c fiber.Ctx) error {
+	// 1. Get user ID from JWT
+	userId := utils.GetUserId(c)
+	if userId == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
+	}
+
+	// 2. Build payload (controller logic)
+	payload := map[string]interface{}{
+		"userId":    userId,
+		"expenseId": c.Params("id"),
+	}
+
+	// 3. Execute the query and get the raw response
+	result, err := utils.ExecuteDBFunctionRaw("SELECT delete_expense($1)", payload)
+	if err != nil {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Database error", err, http.StatusInternalServerError)
+	}
+
+	// 4. Check if the operation was successful
+	success, _ := result["success"].(bool)
+	code, _ := result["code"].(float64)
+	codeInt := int(code)
+	codeStr := strconv.Itoa(codeInt)
+	message, _ := result["message"].(string)
+
+	if message == "" {
+		message = utils.CodeMessageMap[codeStr]
+	}
+
+	if !success {
+		return v1.JSONResponseWithError(c, codeStr, message, nil, codeInt)
+	}
+
+	// 5. If successful, delete the associated image file
+	if data, ok := result["data"].(map[string]interface{}); ok {
+		if imageUrl, exists := data["imageUrl"]; exists {
+			if imageUrlStr, ok := imageUrl.(string); ok && imageUrlStr != "" {
+				// Delete the image file from filesystem
+				if err := utils.DeleteUploadedFile(imageUrlStr); err != nil {
+					// Log the error but don't fail the request since the expense is already deleted
+					fmt.Printf("Warning: Failed to delete image file %s: %v\n", imageUrlStr, err)
+					// You might want to log this to a proper logging system
+				}
+			}
+		}
+	}
+
+	// 6. Return success response
+	return v1.JSONResponseWithData(c, codeStr, message, nil, codeInt)
 }
 
 func AddCategory(c fiber.Ctx) error {
