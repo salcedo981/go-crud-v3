@@ -25,7 +25,7 @@ func DefaultFileUploadConfig() FileUploadConfig {
 	return FileUploadConfig{
 		MaxSize:      5 * 1024 * 1024, // 5MB
 		AllowedTypes: []string{"image/jpeg", "image/png", "image/gif", "image/webp"},
-		UploadPath:   "./uploads/expenses",
+		UploadPath:   "./assets/images/uploads/expenses",
 	}
 }
 
@@ -90,41 +90,37 @@ func UploadFile(c fiber.Ctx, fileHeader *multipart.FileHeader, config FileUpload
 		return "", err
 	}
 
-	// Return relative path or full URL 
-	return fmt.Sprintf("/uploads/expenses/%s", filename), nil
+	// Return relative path or full URL
+	return fmt.Sprintf("/assets/images/uploads/expenses/%s", filename), nil
 }
 
 // DeleteUploadedFile deletes an uploaded file from the filesystem
 func DeleteUploadedFile(filePath string) error {
-    if filePath == "" {
-        return nil
-    }
-    
-    // Extract filename from URL path
-    filename := filepath.Base(filePath)
-    fullPath := filepath.Join("./uploads/expenses", filename)
-    
-    // Check if file exists before attempting to delete
-    if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-        return nil // File doesn't exist, nothing to delete
-    }
-    
-    err := os.Remove(fullPath)
-    if err != nil {
-        return fmt.Errorf("failed to delete file %s: %w", filename, err)
-    }
-    
-    return nil
+	if filePath == "" {
+		return nil
+	}
+
+	// Extract filename from URL path
+	filename := filepath.Base(filePath)
+	fullPath := filepath.Join("./assets/images/uploads/expenses", filename)
+
+	// Check if file exists before attempting to delete
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		return nil // File doesn't exist, nothing to delete
+	}
+
+	err := os.Remove(fullPath)
+	if err != nil {
+		return fmt.Errorf("failed to delete file %s: %w", filename, err)
+	}
+
+	return nil
 }
 
 // ExtractFilenameFromURL extracts the filename from a URL
 func ExtractFilenameFromURL(url string) string {
-    if url == "" {
-        return ""
-    }
-    return filepath.Base(url)
+	if url == "" {
+		return ""
+	}
+	return filepath.Base(url)
 }
-
-
-
-

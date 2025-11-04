@@ -2,6 +2,7 @@ package routers
 
 import (
 	"go_template_v3/pkg/middleware"
+	ctrEncryption "go_template_v3/pkg/services/encryption/controller"
 	ctrFeatureOne "go_template_v3/pkg/services/featureOne/controller"
 	svcHealthcheck "go_template_v3/pkg/services/healthcheck"
 
@@ -10,9 +11,9 @@ import (
 )
 
 func APIRoute(app *fiber.App) {
-    app.Use("/uploads", static.New("./uploads", static.Config{
-        MaxAge: 3600, // 1 hour cache
-    }))
+	app.Use("/assets", static.New("./assets", static.Config{
+		MaxAge: 3600, // 1 hour cache
+	}))
 
 	publicV1 := app.Group("/api/public/v1")
 	privateV1 := app.Group("/api/private/v1")
@@ -54,4 +55,8 @@ func APIRoute(app *fiber.App) {
 
 	expenseGroup.Post("test-internal-send-request", ctrFeatureOne.TestInternalSendRequest)
 
+	// ENCRYPTION
+	encryptionGroup := publicV1.Group("/encryption")
+	encryptionGroup.Post("/encrypt/db-credentials", ctrEncryption.EncryptDBCredentials)
+	encryptionGroup.Post("/decrypt/db-credentials", ctrEncryption.DecryptDBCredentials)
 }

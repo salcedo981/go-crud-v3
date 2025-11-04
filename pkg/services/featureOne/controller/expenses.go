@@ -587,6 +587,9 @@ func processBatchUpdatesAsync(jobId int, userId int, updates []map[string]interf
 
 	// Process each update
 	for i, update := range updates {
+		// Add small delay to prevent overwhelming the database
+		time.Sleep(1 * time.Minute)
+
 		// Create payload for individual expense update
 		expensePayload := make(map[string]interface{})
 
@@ -661,9 +664,6 @@ func processBatchUpdatesAsync(jobId int, userId int, updates []map[string]interf
 
 		// Update progress after each item
 		updateJobProgress(jobId, i+1, successfulCount, failedCount, results)
-
-		// Add small delay to prevent overwhelming the database
-		time.Sleep(1 * time.Minute)
 	}
 
 	// Mark job as completed
