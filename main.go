@@ -54,7 +54,6 @@ func main() {
 		AllowMethods: []string{"GET,POST,PUT,DELETE"},
 		AllowHeaders: []string{"Origin, Content-Type, Accept, Authorization"},
 	}))
-	
 
 	app.Use(logger.New())
 	app.Use(recover.New())

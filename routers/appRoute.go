@@ -44,6 +44,7 @@ func APIRoute(app *fiber.App) {
 	expenseGroup := publicV1.Group("/expenses", middleware.AuthMiddleware)
 	expenseGroup.Put("/batch", ctrFeatureOne.BatchUpdateExpenses)
 	expenseGroup.Put("/batch-async", ctrFeatureOne.BatchUpdateExpensesAsync)
+	expenseGroup.Post("/batch-upload", ctrFeatureOne.BatchUploadExpensesFromCSV)
 	expenseGroup.Get("/batch-async/:jobId", ctrFeatureOne.GetBatchJobStatus)
 
 	expenseGroup.Post("/", ctrFeatureOne.AddExpense)

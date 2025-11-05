@@ -1,6 +1,7 @@
 package ctrFeatureOne
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"go_template_v3/pkg/config"
@@ -366,6 +367,7 @@ func AddCategory(c fiber.Ctx) error {
 // @Failure 500 {object} map[string]string
 // @Router /api/v1/expenses [get]
 
+// Batch Update Expenses
 func BatchUpdateExpenses(c fiber.Ctx) error {
 	var successfulCount = 0
 	var failedCount = 0
@@ -521,7 +523,6 @@ func BatchUpdateExpensesAsync(c fiber.Ctx) error {
 		http.StatusAccepted)
 }
 
-// GetBatchJobStatus - Endpoint to check job status
 func GetBatchJobStatus(c fiber.Ctx) error {
 	// Get user ID from JWT
 	userId := utils.GetUserId(c)
@@ -576,139 +577,109 @@ func GetBatchJobStatus(c fiber.Ctx) error {
 		http.StatusOK)
 }
 
-// processBatchUpdatesAsync - Background worker to process batch updates
-func processBatchUpdatesAsync(jobId int, userId int, updates []map[string]interface{}) {
-	var successfulCount = 0
-	var failedCount = 0
-	results := make([]map[string]interface{}, 0)
-
-	// Update status to processing
-	updateJobStatus(jobId, "processing", 0, 0, 0, nil)
-
-	// Process each update
-	for i, update := range updates {
-		// Add small delay to prevent overwhelming the database
-		time.Sleep(1 * time.Minute)
-
-		// Create payload for individual expense update
-		expensePayload := make(map[string]interface{})
-
-		// Validate expense ID
-		if expenseId, exists := update["expenseId"]; exists {
-			expensePayload["expenseId"] = expenseId
-		} else {
-			failedCount++
-			results = append(results, map[string]interface{}{
-				"index":     i,
-				"expenseId": nil,
-				"message":   "Expense ID is required",
-			})
-			updateJobProgress(jobId, i+1, successfulCount, failedCount, results)
-			continue
-		}
-
-		// Add userId
-		expensePayload["userId"] = userId
-
-		// Copy updateable fields
-		if title, exists := update["title"]; exists {
-			expensePayload["title"] = title
-		}
-		if amount, exists := update["amount"]; exists {
-			expensePayload["amount"] = amount
-		}
-		if categoryId, exists := update["categoryId"]; exists {
-			expensePayload["categoryId"] = categoryId
-		}
-		if date, exists := update["date"]; exists {
-			expensePayload["date"] = date
-		}
-		if notes, exists := update["notes"]; exists {
-			expensePayload["notes"] = notes
-		}
-
-		// Execute the update
-		result, err := utils.ExecuteDBFunctionRaw("SELECT update_expense_v3($1)", expensePayload)
-		if err != nil {
-			log.Printf("Error executing update for expense %v: %v", expensePayload["expenseId"], err)
-			failedCount++
-			results = append(results, map[string]interface{}{
-				"index":     i,
-				"expenseId": expensePayload["expenseId"],
-				"message":   err.Error(),
-			})
-		} else if result["success"] == true {
-			successfulCount++
-			// For successful updates, you might want to store minimal info or skip
-			results = append(results, map[string]interface{}{
-				"index":     i,
-				"expenseId": expensePayload["expenseId"],
-				"message":   "Successfully updated",
-			})
-		} else {
-			failedCount++
-			// Extract only the message from the result
-			message := "Update failed"
-			if msg, exists := result["message"]; exists {
-				message = msg.(string)
-			} else if errMsg, exists := result["error"]; exists {
-				message = errMsg.(string)
-			}
-
-			results = append(results, map[string]interface{}{
-				"index":     i,
-				"expenseId": expensePayload["expenseId"],
-				"message":   message,
-			})
-		}
-
-		// Update progress after each item
-		updateJobProgress(jobId, i+1, successfulCount, failedCount, results)
+// Batch Upload Expenses
+func BatchUploadExpensesFromCSV(c fiber.Ctx) error {
+	// 1. Get user ID from JWT
+	userId := utils.GetUserId(c)
+	if userId == 0 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_401, "User ID not found in token", nil, http.StatusUnauthorized)
 	}
 
-	// Mark job as completed
-	finalStatus := "completed"
-	if failedCount == len(updates) {
-		finalStatus = "failed"
+	// 2. Parse uploaded CSV file
+	file, err := c.FormFile("file")
+	if err != nil {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "CSV file is required", err, http.StatusBadRequest)
 	}
 
-	updateJobStatus(jobId, finalStatus, len(updates), successfulCount, failedCount, results)
-}
+	f, err := file.Open()
+	if err != nil {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to open CSV file", err, http.StatusInternalServerError)
+	}
+	defer f.Close()
 
-// updateJobStatus - Helper to update job status
-func updateJobStatus(jobId int, status string, processed, successful, failed int, results interface{}) {
-	resultsJSON, _ := json.Marshal(results)
-	err := config.DBConnList[0].Exec(
-		"SELECT update_batch_job_progress($1, $2, $3, $4, $5, $6)",
-		jobId,
-		status,
-		processed,
-		successful,
-		failed,
-		string(resultsJSON),
-	).Error
+	reader := csv.NewReader(f)
+	reader.TrimLeadingSpace = true
+	records, err := reader.ReadAll()
+	if err != nil {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Invalid CSV format", err, http.StatusBadRequest)
+	}
+
+	if len(records) < 2 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "CSV must contain header and at least one row", nil, http.StatusBadRequest)
+	}
+
+	// 3. Validate CSV headers
+	expectedHeaders := []string{"title", "amount", "categoryid", "date", "notes"}
+	headers := records[0]
+
+	if len(headers) != len(expectedHeaders) {
+		return v1.JSONResponseWithError(
+			c,
+			respcode.ERR_CODE_400,
+			fmt.Sprintf("Invalid CSV header count. Expected headers: %v", expectedHeaders),
+			nil,
+			http.StatusBadRequest,
+		)
+	}
+
+	for i, expected := range expectedHeaders {
+		if strings.ToLower(strings.TrimSpace(headers[i])) != expected {
+			return v1.JSONResponseWithError(
+				c,
+				respcode.ERR_CODE_400,
+				fmt.Sprintf("Invalid CSV header at column %d: expected '%s', got '%s'", i+1, expected, headers[i]),
+				nil,
+				http.StatusBadRequest,
+			)
+		}
+	}
+
+	// 4. Parse CSV data
+	expenses := make([]map[string]interface{}, 0, len(records)-1)
+	for i, row := range records[1:] {
+		if len(row) != len(headers) {
+			return v1.JSONResponseWithError(c, respcode.ERR_CODE_400,
+				fmt.Sprintf("Row %d has mismatched columns", i+2), nil, http.StatusBadRequest)
+		}
+
+		expense := make(map[string]interface{})
+		for j, header := range headers {
+			expense[strings.ToLower(header)] = strings.TrimSpace(row[j])
+		}
+		expense["userId"] = userId
+		expenses = append(expenses, expense)
+	}
+
+	if len(expenses) > 1000 {
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_400, "Batch too large (max 1000 rows)", nil, http.StatusBadRequest)
+	}
+
+	// 5. Create batch job
+	var jobId int
+	err = config.DBConnList[0].Raw(
+		"SELECT create_batch_job($1, $2, $3)",
+		userId,
+		"expense_batch_upload_csv",
+		len(expenses),
+	).Scan(&jobId).Error
 
 	if err != nil {
-		log.Printf("Error updating job status for job %d: %v", jobId, err)
+		log.Printf("Error creating batch job: %v", err)
+		return v1.JSONResponseWithError(c, respcode.ERR_CODE_500, "Failed to create batch job", err, http.StatusInternalServerError)
 	}
-}
 
-// updateJobProgress - Helper to update job progress (only counts)
-func updateJobProgress(jobId int, processed, successful, failed int, results interface{}) {
-	resultsJSON, _ := json.Marshal(results)
+	// 6. Process in background
+	go processBatchUploadExpensesAsync(jobId, userId, expenses)
 
-	err := config.DBConnList[0].Exec(
-		"SELECT update_batch_job_progress($1, NULL, $2, $3, $4, $5)",
-		jobId,
-		processed,
-		successful,
-		failed,
-		string(resultsJSON),
-	).Error
-
-	if err != nil {
-		log.Printf("Error updating job progress for job %d: %v", jobId, err)
-	}
+	// 7. Return response immediately
+	return v1.JSONResponseWithData(c, respcode.SUC_CODE_200,
+		"CSV batch upload job created successfully",
+		map[string]interface{}{
+			"jobId":      jobId,
+			"totalItems": len(expenses),
+			"status":     "pending",
+		},
+		http.StatusAccepted)
 }
 
 func TestInternalSendRequest(c fiber.Ctx) error {
@@ -785,4 +756,182 @@ func TestInternalSendRequest(c fiber.Ctx) error {
 			statusCodeNum,
 		)
 	}
+}
+
+// HELPER FUNCTIONS FOR BATCH UPDATE AND UPLOAD
+func updateJobProgress(jobId int, processed, successful, failed int, results interface{}) {
+	resultsJSON, _ := json.Marshal(results)
+
+	err := config.DBConnList[0].Exec(
+		"SELECT update_batch_job_progress($1, NULL, $2, $3, $4, $5)",
+		jobId,
+		processed,
+		successful,
+		failed,
+		string(resultsJSON),
+	).Error
+
+	if err != nil {
+		log.Printf("Error updating job progress for job %d: %v", jobId, err)
+	}
+}
+func updateJobStatus(jobId int, status string, processed, successful, failed int, results interface{}) {
+	resultsJSON, _ := json.Marshal(results)
+	err := config.DBConnList[0].Exec(
+		"SELECT update_batch_job_progress($1, $2, $3, $4, $5, $6)",
+		jobId,
+		status,
+		processed,
+		successful,
+		failed,
+		string(resultsJSON),
+	).Error
+
+	if err != nil {
+		log.Printf("Error updating job status for job %d: %v", jobId, err)
+	}
+}
+
+func processBatchUpdatesAsync(jobId int, userId int, updates []map[string]interface{}) {
+	var successfulCount = 0
+	var failedCount = 0
+	results := make([]map[string]interface{}, 0)
+
+	// Update status to processing
+	updateJobStatus(jobId, "processing", 0, 0, 0, nil)
+
+	// Process each update
+	for i, update := range updates {
+		// Add small delay to prevent overwhelming the database
+		time.Sleep(1 * time.Minute)
+
+		// Create payload for individual expense update
+		expensePayload := make(map[string]interface{})
+
+		// Validate expense ID
+		if expenseId, exists := update["expenseId"]; exists {
+			expensePayload["expenseId"] = expenseId
+		} else {
+			failedCount++
+			results = append(results, map[string]interface{}{
+				"index":     i,
+				"expenseId": nil,
+				"message":   "Expense ID is required",
+			})
+			updateJobProgress(jobId, i+1, successfulCount, failedCount, results)
+			continue
+		}
+
+		// Add userId
+		expensePayload["userId"] = userId
+
+		// Copy updateable fields
+		if title, exists := update["title"]; exists {
+			expensePayload["title"] = title
+		}
+		if amount, exists := update["amount"]; exists {
+			expensePayload["amount"] = amount
+		}
+		if categoryId, exists := update["categoryId"]; exists {
+			expensePayload["categoryId"] = categoryId
+		}
+		if date, exists := update["date"]; exists {
+			expensePayload["date"] = date
+		}
+		if notes, exists := update["notes"]; exists {
+			expensePayload["notes"] = notes
+		}
+
+		// Execute the update
+		result, err := utils.ExecuteDBFunctionRaw("SELECT update_expense_v3($1)", expensePayload)
+		if err != nil {
+			log.Printf("Error executing update for expense %v: %v", expensePayload["expenseId"], err)
+			failedCount++
+			results = append(results, map[string]interface{}{
+				"index":     i,
+				"expenseId": expensePayload["expenseId"],
+				"message":   err.Error(),
+			})
+		} else if result["success"] == true {
+			successfulCount++
+			// For successful updates, you might want to store minimal info or skip
+			// results = append(results, map[string]interface{}{
+			// 	"index":     i,
+			// 	"expenseId": expensePayload["expenseId"],
+			// 	"message":   "Successfully updated",
+			// })
+		} else {
+			failedCount++
+			// Extract only the message from the result
+			message := "Update failed"
+			if msg, exists := result["message"]; exists {
+				message = msg.(string)
+			} else if errMsg, exists := result["error"]; exists {
+				message = errMsg.(string)
+			}
+
+			results = append(results, map[string]interface{}{
+				"index":     i,
+				"expenseId": expensePayload["expenseId"],
+				"message":   message,
+			})
+		}
+
+		// Update progress after each item
+		updateJobProgress(jobId, i+1, successfulCount, failedCount, results)
+	}
+
+	// Mark job as completed
+	finalStatus := "completed"
+	if failedCount == len(updates) {
+		finalStatus = "failed"
+	}
+
+	updateJobStatus(jobId, finalStatus, len(updates), successfulCount, failedCount, results)
+}
+
+func processBatchUploadExpensesAsync(jobId int, userId int, expenses []map[string]interface{}) {
+	var successfulCount = 0
+	var failedCount = 0
+	results := make([]map[string]interface{}, 0)
+
+	updateJobStatus(jobId, "processing", 0, 0, 0, nil)
+
+	for i, expense := range expenses {
+		time.Sleep(30 * time.Second)
+		expense["userId"] = userId
+
+		result, err := utils.ExecuteDBFunctionRaw("SELECT add_expense_v3($1)", expense)
+		if err != nil {
+			log.Printf("Error inserting expense row %d: %v", i+1, err)
+			failedCount++
+			results = append(results, map[string]interface{}{
+				"index":   i,
+				"status":  "error",
+				"message": err.Error(),
+			})
+		} else if result["success"] == true {
+			successfulCount++
+		} else {
+			failedCount++
+			msg := "Insert failed"
+			if m, ok := result["message"].(string); ok {
+				msg = m
+			}
+			results = append(results, map[string]interface{}{
+				"index":   i,
+				"status":  "error",
+				"message": msg,
+			})
+		}
+
+		updateJobProgress(jobId, i+1, successfulCount, failedCount, results)
+	}
+
+	finalStatus := "completed"
+	if failedCount == len(expenses) {
+		finalStatus = "failed"
+	}
+
+	updateJobStatus(jobId, finalStatus, len(expenses), successfulCount, failedCount, results)
 }
